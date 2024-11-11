@@ -13,9 +13,7 @@ import cohere
 from langchain_community.vectorstores import Qdrant
 from langchain_community.embeddings import HuggingFaceBgeEmbeddings
 from qdrant_client import QdrantClient
-
-
-test = Flask(__name__, template_folder='templates')
+from cohere import ClassifyExample
 
 # Set Oracle environment variables
 #os.environ['ORACLE_HOME'] = '/u01/app/oracle/product/19.0.0/dbhome_1'
@@ -46,8 +44,8 @@ embeddings = HuggingFaceBgeEmbeddings(
     encode_kwargs=encode_kwargs
 )
 
-url = "http://localhost:6333"
-collection_name = "test"
+url = "http://192.168.1.36:6333"
+collection_name = "gpt_db"
 client = QdrantClient(url=url, prefer_grpc=False)
 
 lock = threading.Lock()
@@ -69,7 +67,7 @@ def generate_response(query, doc_content):
     try:
         response = co.generate(
             model='command-xlarge-nightly',
-            prompt=f"User query: {query}\nRelevant documents: {doc_content}\n\nPlease provide a helpful response based on the relevant documents. If the user's query is not addressed within the provided documents and is related to Oracle, perform an internet search and provide the best possible answer. If the question is not from either the uploaded document or another document present in the vector store, reply with: 'Sorry, I cannot find the information you're looking for.'",
+            prompt=f"User query (in user's language): {query}\nRelevant documents: {doc_content}\n\n  If query in ['hello', 'hi', 'hey'], respond 'Hello! It's nice to meet you. How can I assist you today?'; elif query in ['how are you', 'how r u'], respond 'I'm doing well, thanks for asking!'; elif query in ['what is your name', 'what's your name'], respond 'I don't have a personal name, but you can call me DB Gnie Assistant.'; elif Please provide a helpful response based on the relevant documents, Ensure that the response is in the same language as the user's query; elif the user's query is not addressed within the provided documents and is related to Oracle database, perform an internet search and provide the best possible answer; elif the query is unrelated to Oracle database, respond with: 'Sorry, this question is not related to Oracle database.'",
             max_tokens=500
         )
         return response.generations[0].text.strip()
@@ -136,12 +134,45 @@ def connect_to_app(username, password, dns):
     except cx_Oracle.DatabaseError as e:
         print(f"Application connection error: {e}")
         return None
+
+def get_intent_from_llm(query):
+    # Call Cohere API to analyze the query and extract intent
+    response = co.classify(
+        model='embed-multilingual-v2.0',  # Use the appropriate model
+        inputs=[query],
+        examples=[
+            # Provide examples that map typical queries to intents (at least 2 for each label.)
+            ClassifyExample(text='give me the details about workflow mailer status.', label='workflow_mailer_status'),
+            ClassifyExample(text='i want the details about workflow mailer status.', label='workflow_mailer_status'),
+            ClassifyExample(text='give me the details about concurrent manager process status.', label='concurrent_manager_status'),
+            ClassifyExample(text='i want to know the  details about concurrent manager process status.', label='concurrent_manager_status'),
+            ClassifyExample(text='give me the details about concurrent manager status.', label='concurrent_manager_status'),
+            ClassifyExample(text='I want to know the details about concurrent manager status.', label='concurrent_manager_status'),
+            ClassifyExample(text='give me the details about blocking sessions.', label='blocking_sessions'),
+            ClassifyExample(text='I want to know about blocking sessions.', label='blocking_sessions'),
+            ClassifyExample(text='I want to know about tablespace usage.', label='tablespace_usage'),
+            ClassifyExample(text='Can you give me the instance information?', label='instance_information'),
+            ClassifyExample(text='Tell me about the database information.', label='database_information'),
+            ClassifyExample(text='Add responsibility with username John and responsibility key .', label='add_responsibility'),
+            ClassifyExample(text='what is the current tablespace usage.', label='tablespace_usage'),
+            ClassifyExample(text='give me the instance information?', label='instance_information'),
+            ClassifyExample(text='give me the long running concurrent program information?', label='long_running_concurrent_programs'),
+            ClassifyExample(text='Tell me about the long running concurrent program information?', label='long_running_concurrent_programs'),
+            ClassifyExample(text='print the database information.', label='database_information'),
+            ClassifyExample(text='i would like to add a new responsibility to username alex and responsibility key is admin.', label='add_responsibility')
+            # Add more examples as needed
+        ]
+    )
+
     
-@test.route('/')
+    intent = response.classifications[0].prediction
+    return intent
+    
+@app.route('/')
 def index():
     return render_template('index.html')   
 
-@test.route('/connect', methods=['POST'])
+@app.route('/connect', methods=['POST'])
 def connect():
     data = request.json
     db_type = data.get('db_type')
@@ -164,7 +195,7 @@ def connect():
     else:
         return jsonify({"error": "Failed to connect to the database"}), 500
 
-@test.route('/upload', methods=['POST'])
+@app.route('/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:
         return jsonify({"error": "No file part"}), 400
@@ -184,7 +215,7 @@ def upload_file():
     else:
         return jsonify({"error": "Invalid file type. Allowed file types are .pdf"}), 400 
     
-@test.route('/connect_app', methods=['POST'])
+@app.route('/connect_app', methods=['POST'])
 def connect_app():
     data = request.json
     app_type = data.get('app_type')
@@ -305,6 +336,42 @@ def format_tablespace_html(tablespace_data):
     html_table += "</table>"
     return html_table
 
+def format_long_running_programs_html(long_running_data):
+    if not long_running_data:
+        return None
+    html_table = "<table border='1'><tr><th>SID</th><th>Serial#</th><th>Username</th><th>Operation</th><th>Object</th><th>Elapsed Time (s)</th><th>Start Time</th><th>Complete (%)</th></tr>"
+    for row in long_running_data:
+        html_table += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td><td>{row[3]}</td><td>{row[4]}</td><td>{row[5]}</td><td>{row[6]}</td><td>{row[7]}</td></tr>"
+    html_table += "</table>"
+    return html_table
+
+def format_concurrent_manager_status_html(concurrent_manager_status_data):
+    if not concurrent_manager_status_data:
+        return None
+    html_table = "<table border='1'><tr><th>CONCURRENT_MANAGER_NAME</th><th>MANAGER_NODE</th><th>STATUS</th></tr>"
+    for row in concurrent_manager_status_data:
+        html_table += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
+    html_table += "</table>"
+    return html_table
+
+def format_workflow_mailer_status_html(workflow_mailer_status_data):
+    if not workflow_mailer_status_data:
+        return None
+    html_table = "<table border='1'><tr><th>CONTAINER_NAME</th><th>PROCID</th><th>E</th><th>COMPONENT_NAME</th><th>STARTUP_MODE</th><th>COMPONENT_STATUS</th></tr>"
+    for row in workflow_mailer_status_data:
+        html_table += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td><td>{row[3]}</td><td>{row[4]}</td><td>{row[5]}</td></tr>"
+    html_table += "</table>"
+    return html_table
+
+def format_blocking_html(blocking_sessions_data):
+    if not blocking_sessions_data:
+        return None
+    html_table = "<table border='1'><tr><th>Blocking Session</th></tr>"
+    for row in blocking_sessions_data:
+        html_table += f"<tr><td>{row[0]}</td></tr>"
+    html_table += "</table>"
+    return html_table
+
 def format_instance_html(instance_data):
     if not instance_data:
         return None
@@ -349,7 +416,7 @@ def get_query_from_file(section_name):
     return fetched_query    
 
 
-@test.route('/chat', methods=['POST'])
+@app.route('/chat', methods=['POST'])
 def chat():
     data = request.json
     query = data.get('query', '').strip()
@@ -374,6 +441,52 @@ def chat():
             else:
                 response = "Failed to fetch tablespace usage data"
             return jsonify({"response": response}), 200
+        elif 'blocking sessions' in query.lower():
+            sql_query=get_query_from_file('blocking_sessions')
+            result=execute_query(sql_query)
+            if result:
+                html_table=format_blocking_html(result)
+                if not html_table:
+                    response="Failed to format blocking session data into html"
+                else:
+                    response=html_table
+            else:
+                response="Failed to fetch blocking session data"
+            return jsonify({"respomse": response}), 200 
+        elif 'workflow mailer status' in query.lower():
+            sql_query=get_query_from_file('workflow_mailer_status')
+            result=execute_query(sql_query)
+            if result:
+                html_table=format_workflow_mailer_status_html(result)
+                if not html_table:
+                    response="Failed to format workflow mailer data into html"
+                else:
+                    response=html_table
+            else:
+                response="Failed to fetch workflow mailer data"
+            return jsonify({"respomse": response}), 200 
+        elif 'concurrent manager processess' in query.lower():
+            sql_query = get_query_from_file('concurrent_manager_status')
+            result = execute_query(sql_query)
+            if result:
+                html_table = format_concurrent_manager_status_html(result)
+                if not html_table:
+                    response = "Failed to format concurrent manager processess data into HTML"
+                else:
+                    response = html_table
+            else:
+                response = "Failed to fetch concurrent manager processess data"
+            return jsonify({"response": response}), 200                            
+        elif 'long running' in query.lower():
+            sql_query=get_query_from_file('long_running_concurrent_programs')
+            result=execute_query(sql_query)
+            if result:
+                html_table=format_long_running_programs_html(result)
+                if not html_table:
+                    response="Failed to format long running program data into html"  
+                else:
+                    response="Failed to fetch long running program data"   
+                return jsonify({"response": response}), 200                 
         elif 'instance information' in query.lower():
             sql_query = get_query_from_file('instance_information')
             result = execute_query(sql_query)
@@ -443,7 +556,7 @@ def chat():
             return jsonify({"error": "Failed to generate a response."}), 500
 
         
-@test.route('/db_chat', methods=['POST'])
+@app.route('/db_chat', methods=['POST'])
 def db_chat():
     data = request.json
     query = data.get('query')
@@ -456,6 +569,12 @@ def db_chat():
     
     response_text = ""
     
+    if not query:
+        return jsonify({"error": "Query not provided"}), 400
+
+    intent = get_intent_from_llm(query)
+    response_text = ""
+    
     # Clear db_type if app_type is selected and vice versa
     # This ensures only one is active at a time
     if db_type and app_type:
@@ -465,7 +584,7 @@ def db_chat():
         elif request.form.get('db_type'):
             app_type = None  # Clear app_type when db_type is explicitly selected
 
-    if 'add responsibility' in query.lower():
+    if intent == 'add_responsibility':
         if app_type:  # Ensure this only works if app_type is selected
             if 'with username' in query.lower() and 'and responsibility key' in query.lower():
                 username_1 = query.split('username ')[1].split(' and')[0]
@@ -482,11 +601,26 @@ def db_chat():
 
     response_text = ""
     # Check if the query is related to tablespace usage
-    if 'tablespace usage' in query.lower():
+    if intent == 'tablespace_usage':
         tablespace_query = get_query_from_file('tablespace_usage')
         tablespace_data = execute_query(tablespace_query, db_type=db_type, app_type=app_type)
         tablespace_html = format_tablespace_html(tablespace_data)
         response_text = tablespace_html if tablespace_html else "No tablespace data found."
+    elif intent == 'concurrent_manager_status':
+        concurrent_manager_query = get_query_from_file('concurrent_manager_status')
+        concurrent_manager_data = execute_query(concurrent_manager_query, app_type=app_type)
+        concurrent_manager_html = format_concurrent_manager_status_html(concurrent_manager_data)
+        response_text = concurrent_manager_html if concurrent_manager_html else "No concurrent manager processess information found."    
+    elif intent == 'long_running_concurrent_programs':
+        long_running_query=get_query_from_file('long_running_concurrent_programs')
+        long_running_data=execute_query(long_running_query, app_type, db_type=None)
+        long_running_html=format_long_running_programs_html(long_running_data)
+        response_text= long_running_html if long_running_html else "no long running data found."  
+    elif intent == 'workflow_mailer_status':
+        workflow_mailer_query=get_query_from_file('workflow_mailer_status')
+        workflow_mailer_data=execute_query(workflow_mailer_query,app_type=app_type) 
+        workflow_mailer_html=format_workflow_mailer_status_html(workflow_mailer_data)
+        response_text=workflow_mailer_html if workflow_mailer_html else "no workflow mailer data found."  
     elif 'show user' in query.lower():
         showuser_query = get_query_from_file('show_user')
 
@@ -499,18 +633,24 @@ def db_chat():
         elif app_type:
             showuser_data = execute_query(showuser_query, app_type=app_type)
             response_text = format_userinfo_html(showuser_data) if showuser_data else "No user information found in application."   
-    elif 'instance information' in query.lower():
+    
+    elif intent == 'blocking_sessions':
+        blocking_query=get_query_from_file('blocking_sessions')
+        blocking_data=execute_query(blocking_query, db_type=db_type)
+        blocking_html=format_blocking_html(blocking_data)
+        response_text=blocking_html if blocking_html else "No blocking sessions found"
+    elif intent == 'instance_information':
         instance_query = get_query_from_file('instance_information')
         instance_data = execute_query(instance_query, db_type=db_type, app_type=app_type)
         instance_html = format_instance_html(instance_data)
         response_text = instance_html if instance_html else "No instance information found."
-    elif 'database information' in query.lower():
+    elif intent == 'database_information':
         database_query = get_query_from_file('database_information')
         database_data = execute_query(database_query, db_type)
         database_html = format_database_html(database_data)
         response_text = database_html if database_html else "No database information found."
     else:
-        response_text = "Invalid query. Please specify one of the following: tablespace usage, instance information, database information, or add responsibility with username and responsibility key."
+        response_text = "Invalid query. Please specify one of the following: tablespace usage,concurrent manager active/inactive status blocking sessions, instance information, database information, workflow mailer status, long running program status or add responsibility with username and responsibility key."
 
     summary = co.generate(
     model='command-xlarge-nightly',
@@ -525,10 +665,11 @@ def db_chat():
 
     return jsonify({"response": response_text, "summary": summary.generations[0].text.strip()})
 
-@test.route('/uploads/<filename>')
+
+@app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)      
     
     
 if __name__ == '__main__':
-    test.run(debug=False)
+    app.run(debug=False)
